@@ -34,7 +34,65 @@
 #include <limits>
 #include <functional>
 #include <unordered_map>
-#endif
+
+namespace zmq
+{
+	// socket ref or native file descriptor for poller
+	class poller_ref_t
+	{
+	public:
+		enum RefType
+		{
+			RT_SOCKET,
+			RT_FD
+		};
+
+		poller_ref_t() : poller_ref_t(socket_ref{})
+		{}
+
+		poller_ref_t(const zmq::socket_ref& socket) : data{RT_SOCKET, socket, {}}
+		{}
+
+		poller_ref_t(zmq::fd_t fd) : data{RT_FD, {}, fd}
+		{}
+
+		size_t hash() const ZMQ_NOTHROW	
+		{
+			std::size_t h = 0;
+			hash_combine(h, std::get<0>(data));
+        	hash_combine(h, std::get<1>(data));
+        	hash_combine(h, std::get<2>(data));
+			return h;
+		}
+
+		bool operator == (const poller_ref_t& o) const ZMQ_NOTHROW
+		{
+			return data == o.data;
+		}
+
+	private:
+		template <class T>
+		static void hash_combine(std::size_t& seed, const T& v) ZMQ_NOTHROW
+		{
+    		std::hash<T> hasher;
+    		seed ^= hasher(v) + 0x9e3779b9 + (seed<<6) + (seed>>2);
+		}
+
+		std::tuple<int, zmq::socket_ref, zmq::fd_t> data;
+
+	}; // class poller_ref_t
+
+} // namespace zmq
+
+// std::hash<> specialization for std::unordered_map
+template <> struct std::hash<zmq::poller_ref_t>
+{
+	size_t operator()(const zmq::poller_ref_t& ref) const ZMQ_NOTHROW
+	{
+		return ref.hash();
+	}
+};
+#endif //  ZMQ_CPP11
 
 namespace zmq
 {
@@ -49,7 +107,7 @@ recv_multipart_n(socket_ref s, OutputIt out, size_t n, recv_flags flags)
     size_t msg_count = 0;
     message_t msg;
     while (true) {
-        if (CheckN) {
+        if ZMQ_CONSTEXPR_IF (CheckN) {
             if (msg_count >= n)
                 throw std::runtime_error(
                   "Too many message parts in recv_multipart_n");
@@ -66,6 +124,39 @@ recv_multipart_n(socket_ref s, OutputIt out, size_t n, recv_flags flags)
             break;
     }
     return msg_count;
+}
+
+inline bool is_little_endian()
+{
+    const uint16_t i = 0x01;
+    return *reinterpret_cast<const uint8_t *>(&i) == 0x01;
+}
+
+inline void write_network_order(unsigned char *buf, const uint32_t value)
+{
+    if (is_little_endian()) {
+        ZMQ_CONSTEXPR_VAR uint32_t mask = (std::numeric_limits<std::uint8_t>::max)();
+        *buf++ = static_cast<unsigned char>((value >> 24) & mask);
+        *buf++ = static_cast<unsigned char>((value >> 16) & mask);
+        *buf++ = static_cast<unsigned char>((value >> 8) & mask);
+        *buf++ = static_cast<unsigned char>(value & mask);
+    } else {
+        std::memcpy(buf, &value, sizeof(value));
+    }
+}
+
+inline uint32_t read_u32_network_order(const unsigned char *buf)
+{
+    if (is_little_endian()) {
+        return (static_cast<uint32_t>(buf[0]) << 24)
+               + (static_cast<uint32_t>(buf[1]) << 16)
+               + (static_cast<uint32_t>(buf[2]) << 8)
+               + static_cast<uint32_t>(buf[3]);
+    } else {
+        uint32_t value;
+        std::memcpy(&value, buf, sizeof(value));
+        return value;
+    }
 }
 } // namespace detail
 
@@ -190,42 +281,37 @@ message_t encode(const Range &parts)
 
     // First pass check sizes
     for (const auto &part : parts) {
-        size_t part_size = part.size();
-        if (part_size > std::numeric_limits<std::uint32_t>::max()) {
+        const size_t part_size = part.size();
+        if (part_size > (std::numeric_limits<std::uint32_t>::max)()) {
             // Size value must fit into uint32_t.
             throw std::range_error("Invalid size, message part too large");
         }
-        size_t count_size = 5;
-        if (part_size < std::numeric_limits<std::uint8_t>::max()) {
-            count_size = 1;
-        }
+        const size_t count_size =
+          part_size < (std::numeric_limits<std::uint8_t>::max)() ? 1 : 5;
         mmsg_size += part_size + count_size;
     }
 
     message_t encoded(mmsg_size);
     unsigned char *buf = encoded.data<unsigned char>();
     for (const auto &part : parts) {
-        uint32_t part_size = part.size();
+        const uint32_t part_size = static_cast<uint32_t>(part.size());
         const unsigned char *part_data =
           static_cast<const unsigned char *>(part.data());
 
-        // small part
-        if (part_size < std::numeric_limits<std::uint8_t>::max()) {
-            *buf++ = (unsigned char) part_size;
-            memcpy(buf, part_data, part_size);
-            buf += part_size;
-            continue;
+        if (part_size < (std::numeric_limits<std::uint8_t>::max)()) {
+            // small part
+            *buf++ = static_cast<unsigned char>(part_size);
+        } else {
+            // big part
+            *buf++ = (std::numeric_limits<uint8_t>::max)();
+            detail::write_network_order(buf, part_size);
+            buf += sizeof(part_size);
         }
-
-        // big part
-        *buf++ = std::numeric_limits<uint8_t>::max();
-        *buf++ = (part_size >> 24) & std::numeric_limits<std::uint8_t>::max();
-        *buf++ = (part_size >> 16) & std::numeric_limits<std::uint8_t>::max();
-        *buf++ = (part_size >> 8) & std::numeric_limits<std::uint8_t>::max();
-        *buf++ = part_size & std::numeric_limits<std::uint8_t>::max();
-        memcpy(buf, part_data, part_size);
+        std::memcpy(buf, part_data, part_size);
         buf += part_size;
     }
+
+    assert(static_cast<size_t>(buf - encoded.data<unsigned char>()) == mmsg_size);
     return encoded;
 }
 
@@ -251,23 +337,25 @@ template<class OutputIt> OutputIt decode(const message_t &encoded, OutputIt out)
 
     while (source < limit) {
         size_t part_size = *source++;
-        if (part_size == std::numeric_limits<std::uint8_t>::max()) {
-            if (source > limit - 4) {
+        if (part_size == (std::numeric_limits<std::uint8_t>::max)()) {
+            if (static_cast<size_t>(limit - source) < sizeof(uint32_t)) {
                 throw std::out_of_range(
                   "Malformed encoding, overflow in reading size");
             }
-            part_size = ((uint32_t) source[0] << 24) + ((uint32_t) source[1] << 16)
-                        + ((uint32_t) source[2] << 8) + (uint32_t) source[3];
-            source += 4;
+            part_size = detail::read_u32_network_order(source);
+            // the part size is allowed to be less than 0xFF
+            source += sizeof(uint32_t);
         }
 
-        if (source > limit - part_size) {
+        if (static_cast<size_t>(limit - source) < part_size) {
             throw std::out_of_range("Malformed encoding, overflow in reading part");
         }
         *out = message_t(source, part_size);
         ++out;
         source += part_size;
     }
+
+    assert(source == limit);
     return out;
 }
 
@@ -301,7 +389,7 @@ class multipart_t
     multipart_t() {}
 
     // Construct from socket receive
-    multipart_t(socket_t &socket) { recv(socket); }
+    multipart_t(socket_ref socket) { recv(socket); }
 
     // Construct from memory block
     multipart_t(const void *src, size_t size) { addmem(src, size); }
@@ -313,10 +401,10 @@ class multipart_t
     multipart_t(message_t &&message) { add(std::move(message)); }
 
     // Move constructor
-    multipart_t(multipart_t &&other) { m_parts = std::move(other.m_parts); }
+    multipart_t(multipart_t &&other) ZMQ_NOTHROW { m_parts = std::move(other.m_parts); }
 
     // Move assignment operator
-    multipart_t &operator=(multipart_t &&other)
+    multipart_t &operator=(multipart_t &&other) ZMQ_NOTHROW
     {
         m_parts = std::move(other.m_parts);
         return *this;
@@ -363,7 +451,7 @@ class multipart_t
     bool empty() const { return m_parts.empty(); }
 
     // Receive multipart message from socket
-    bool recv(socket_t &socket, int flags = 0)
+    bool recv(socket_ref socket, int flags = 0)
     {
         clear();
         bool more = true;
@@ -383,7 +471,7 @@ class multipart_t
     }
 
     // Send multipart message to socket
-    bool send(socket_t &socket, int flags = 0)
+    bool send(socket_ref socket, int flags = 0)
     {
         flags &= ~(ZMQ_SNDMORE);
         bool more = size() > 0;
@@ -567,7 +655,7 @@ class multipart_t
             ss << "\n[" << std::dec << std::setw(3) << std::setfill('0') << size
                << "] ";
             if (size >= 1000) {
-                ss << "... (to big to print)";
+                ss << "... (too big to print)";
                 continue;
             }
             for (size_t j = 0; j < size; j++) {
@@ -582,14 +670,24 @@ class multipart_t
     }
 
     // Check if equal to other multipart
-    bool equal(const multipart_t *other) const
+    bool equal(const multipart_t *other) const ZMQ_NOTHROW
     {
-        if (size() != other->size())
+        return *this == *other;
+    }
+
+    bool operator==(const multipart_t &other) const ZMQ_NOTHROW
+    {
+        if (size() != other.size())
             return false;
         for (size_t i = 0; i < size(); i++)
-            if (*peek(i) != *other->peek(i))
+            if (at(i) != other.at(i))
                 return false;
         return true;
+    }
+
+    bool operator!=(const multipart_t &other) const ZMQ_NOTHROW
+    {
+        return !(*this == other);
     }
 
 #ifdef ZMQ_CPP11
@@ -643,20 +741,42 @@ class active_poller_t
 
     void add(zmq::socket_ref socket, event_flags events, handler_type handler)
     {
-        auto it = decltype(handlers)::iterator{};
-        auto inserted = bool{};
-        std::tie(it, inserted) = handlers.emplace(
-          socket, std::make_shared<handler_type>(std::move(handler)));
+        const poller_ref_t ref{socket};
+
+        if (!handler)
+            throw std::invalid_argument("null handler in active_poller_t::add (socket)");
+        auto ret = handlers.emplace(
+          ref, std::make_shared<handler_type>(std::move(handler)));
+        if (!ret.second)
+            throw error_t(EINVAL); // already added
         try {
-            base_poller.add(socket, events,
-                            inserted && *(it->second) ? it->second.get() : nullptr);
-            need_rebuild |= inserted;
+            base_poller.add(socket, events, ret.first->second.get());
+            need_rebuild = true;
         }
-        catch (const zmq::error_t &) {
+        catch (...) {
             // rollback
-            if (inserted) {
-                handlers.erase(socket);
-            }
+            handlers.erase(ref);
+            throw;
+        }
+    }
+
+    void add(fd_t fd, event_flags events, handler_type handler)
+    {
+        const poller_ref_t ref{fd};
+
+        if (!handler)
+            throw std::invalid_argument("null handler in active_poller_t::add (fd)");
+        auto ret = handlers.emplace(
+          ref, std::make_shared<handler_type>(std::move(handler)));
+        if (!ret.second)
+            throw error_t(EINVAL); // already added
+        try {
+            base_poller.add(fd, events, ret.first->second.get());
+            need_rebuild = true;
+        }
+        catch (...) {
+            // rollback
+            handlers.erase(ref);
             throw;
         }
     }
@@ -668,9 +788,21 @@ class active_poller_t
         need_rebuild = true;
     }
 
+    void remove(fd_t fd)
+    {
+        base_poller.remove(fd);
+        handlers.erase(fd);
+        need_rebuild = true;
+    }
+
     void modify(zmq::socket_ref socket, event_flags events)
     {
         base_poller.modify(socket, events);
+    }
+
+    void modify(fd_t fd, event_flags events)
+    {
+        base_poller.modify(fd, events);
     }
 
     size_t wait(std::chrono::milliseconds timeout)
@@ -688,8 +820,8 @@ class active_poller_t
         std::for_each(poller_events.begin(),
                       poller_events.begin() + static_cast<ptrdiff_t>(count),
                       [](decltype(base_poller)::event_type &event) {
-                          if (event.user_data != nullptr)
-                              (*event.user_data)(event.events);
+                          assert(event.user_data != nullptr);
+                          (*event.user_data)(event.events);
                       });
         return count;
     }
@@ -702,7 +834,9 @@ class active_poller_t
     bool need_rebuild{false};
 
     poller_t<handler_type> base_poller{};
-    std::unordered_map<socket_ref, std::shared_ptr<handler_type>> handlers{};
+
+    std::unordered_map<zmq::poller_ref_t, std::shared_ptr<handler_type>> handlers{};
+
     std::vector<decltype(base_poller)::event_type> poller_events{};
     std::vector<std::shared_ptr<handler_type>> poller_handlers{};
 };     // class active_poller_t

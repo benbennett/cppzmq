@@ -1,6 +1,6 @@
 #pragma once
 
-#include <catch.hpp>
+#include <catch2/catch_all.hpp>
 #include <zmq.hpp>
 
 #if defined(ZMQ_CPP11)
@@ -33,3 +33,22 @@ struct common_server_client_setup
     std::string endpoint;
 };
 #endif
+
+#define CHECK_THROWS_ZMQ_ERROR(ecode, expr)                                         \
+    do {                                                                            \
+        try {                                                                       \
+            expr;                                                                   \
+            CHECK(false);                                                           \
+        }                                                                           \
+        catch (const zmq::error_t &ze) {                                            \
+            INFO(std::string("Unexpected error code: ") + ze.what());               \
+            CHECK(ze.num() == ecode);                                               \
+        }                                                                           \
+        catch (const std::exception &ex) {                                          \
+            INFO(std::string("Unexpected exception: ") + ex.what());                \
+            CHECK(false);                                                           \
+        }                                                                           \
+        catch (...) {                                                               \
+            CHECK(false);                                                           \
+        }                                                                           \
+    } while (false)

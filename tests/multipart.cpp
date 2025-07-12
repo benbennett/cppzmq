@@ -1,7 +1,23 @@
-#include <catch.hpp>
+#include <catch2/catch_all.hpp>
 #include <zmq_addon.hpp>
 
 #ifdef ZMQ_HAS_RVALUE_REFS
+
+#ifdef ZMQ_CPP17
+static_assert(std::is_invocable<decltype(&zmq::multipart_t::send),
+                                zmq::multipart_t *,
+                                zmq::socket_ref,
+                                int>::value,
+              "Can't multipart_t::send with socket_ref");
+static_assert(std::is_invocable<decltype(&zmq::multipart_t::recv),
+                                zmq::multipart_t *,
+                                zmq::socket_ref,
+                                int>::value,
+              "Can't multipart_t::recv with socket_ref");
+#endif
+static_assert(std::is_constructible<zmq::multipart_t, zmq::socket_ref>::value,
+              "Can't construct with socket_ref");
+
 /// \todo split this up into separate test cases
 ///
 TEST_CASE("multipart legacy test", "[multipart]")
@@ -58,6 +74,21 @@ TEST_CASE("multipart legacy test", "[multipart]")
     assert(copy.size() == 3);
     assert(ok);
     assert(copy.equal(&multipart));
+
+    // Test equality operators
+    assert(copy == multipart);
+    assert(multipart == copy);
+
+    multipart.pop();
+
+    assert(copy != multipart);
+    assert(multipart != copy);
+
+    multipart_t emptyMessage1 {};
+    multipart_t emptyMessage2 {};
+
+    assert(emptyMessage1 == emptyMessage2);
+    assert(emptyMessage2 == emptyMessage1);
 
     multipart.clear();
     assert(multipart.empty());

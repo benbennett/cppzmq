@@ -32,29 +32,43 @@
 #endif
 #endif
 
+// included here for _HAS_CXX* macros
+#include <zmq.h>
+
+#if defined(_MSVC_LANG)
+#define CPPZMQ_LANG _MSVC_LANG
+#else
+#define CPPZMQ_LANG __cplusplus
+#endif
+// overwrite if specific language macros indicate higher version
+#if defined(_HAS_CXX14) && _HAS_CXX14 && CPPZMQ_LANG < 201402L
+#undef CPPZMQ_LANG
+#define CPPZMQ_LANG 201402L
+#endif
+#if defined(_HAS_CXX17) && _HAS_CXX17 && CPPZMQ_LANG < 201703L
+#undef CPPZMQ_LANG
+#define CPPZMQ_LANG 201703L
+#endif
+
 // macros defined if has a specific standard or greater
-#if (defined(__cplusplus) && __cplusplus >= 201103L)                                \
-  || (defined(_MSC_VER) && _MSC_VER >= 1900)
+#if CPPZMQ_LANG >= 201103L || (defined(_MSC_VER) && _MSC_VER >= 1900)
 #define ZMQ_CPP11
 #endif
-#if (defined(__cplusplus) && __cplusplus >= 201402L)                                \
-  || (defined(_HAS_CXX14) && _HAS_CXX14 == 1)                                       \
-  || (defined(_HAS_CXX17)                                                           \
-      && _HAS_CXX17                                                                 \
-           == 1) // _HAS_CXX14 might not be defined when using C++17 on MSVC
+#if CPPZMQ_LANG >= 201402L
 #define ZMQ_CPP14
 #endif
-#if (defined(__cplusplus) && __cplusplus >= 201703L)                                \
-  || (defined(_HAS_CXX17) && _HAS_CXX17 == 1)
+#if CPPZMQ_LANG >= 201703L
 #define ZMQ_CPP17
 #endif
 
-#if defined(ZMQ_CPP14)
+#if defined(ZMQ_CPP14) && !defined(_MSC_VER)
 #define ZMQ_DEPRECATED(msg) [[deprecated(msg)]]
 #elif defined(_MSC_VER)
 #define ZMQ_DEPRECATED(msg) __declspec(deprecated(msg))
 #elif defined(__GNUC__)
 #define ZMQ_DEPRECATED(msg) __attribute__((deprecated(msg)))
+#else
+#define ZMQ_DEPRECATED(msg)
 #endif
 
 #if defined(ZMQ_CPP17)
@@ -80,17 +94,21 @@
 #define ZMQ_CONSTEXPR_VAR const
 #define ZMQ_CPP11_DEPRECATED(msg)
 #endif
+#if defined(ZMQ_CPP14) && (!defined(_MSC_VER) || _MSC_VER > 1900) && (!defined(__GNUC__) || __GNUC__ > 5 || (__GNUC__ == 5 && __GNUC_MINOR__ > 3))
+#define ZMQ_EXTENDED_CONSTEXPR
+#endif
 #if defined(ZMQ_CPP17)
 #define ZMQ_INLINE_VAR inline
+#define ZMQ_CONSTEXPR_IF constexpr
 #else
 #define ZMQ_INLINE_VAR
+#define ZMQ_CONSTEXPR_IF
 #endif
-
-#include <zmq.h>
 
 #include <cassert>
 #include <cstring>
 
+#include <type_traits>
 #include <algorithm>
 #include <exception>
 #include <iomanip>
@@ -103,23 +121,34 @@
 #include <tuple>
 #include <memory>
 #endif
-#ifdef ZMQ_CPP17
-#ifdef __has_include
-#if __has_include(<optional>)
-#include <optional>
-#define ZMQ_HAS_OPTIONAL 1
-#endif
-#if __has_include(<string_view>)
-#include <string_view>
-#define ZMQ_HAS_STRING_VIEW 1
-#endif
+
+#if defined(__has_include) && defined(ZMQ_CPP17)
+#define CPPZMQ_HAS_INCLUDE_CPP17(X) __has_include(X)
+#else
+#define CPPZMQ_HAS_INCLUDE_CPP17(X) 0
 #endif
 
+#if CPPZMQ_HAS_INCLUDE_CPP17(<optional>) && !defined(CPPZMQ_HAS_OPTIONAL)
+#define CPPZMQ_HAS_OPTIONAL 1
+#endif
+#ifndef CPPZMQ_HAS_OPTIONAL
+#define CPPZMQ_HAS_OPTIONAL 0
+#elif CPPZMQ_HAS_OPTIONAL
+#include <optional>
+#endif
+
+#if CPPZMQ_HAS_INCLUDE_CPP17(<string_view>) && !defined(CPPZMQ_HAS_STRING_VIEW)
+#define CPPZMQ_HAS_STRING_VIEW 1
+#endif
+#ifndef CPPZMQ_HAS_STRING_VIEW
+#define CPPZMQ_HAS_STRING_VIEW 0
+#elif CPPZMQ_HAS_STRING_VIEW
+#include <string_view>
 #endif
 
 /*  Version macros for compile-time API version detection                     */
 #define CPPZMQ_VERSION_MAJOR 4
-#define CPPZMQ_VERSION_MINOR 7
+#define CPPZMQ_VERSION_MINOR 11
 #define CPPZMQ_VERSION_PATCH 0
 
 #define CPPZMQ_VERSION                                                              \
@@ -247,32 +276,56 @@ struct is_range<
 typedef zmq_free_fn free_fn;
 typedef zmq_pollitem_t pollitem_t;
 
+// duplicate definition from libzmq 4.3.3
+#if defined _WIN32
+#if defined _WIN64
+typedef unsigned __int64 fd_t;
+#else
+typedef unsigned int fd_t;
+#endif
+#else
+typedef int fd_t;
+#endif
+
 class error_t : public std::exception
 {
   public:
-    error_t() : errnum(zmq_errno()) {}
+    error_t() ZMQ_NOTHROW : errnum(zmq_errno()) {}
+    explicit error_t(int err) ZMQ_NOTHROW : errnum(err) {}
     virtual const char *what() const ZMQ_NOTHROW ZMQ_OVERRIDE
     {
         return zmq_strerror(errnum);
     }
-    int num() const { return errnum; }
+    int num() const ZMQ_NOTHROW { return errnum; }
 
   private:
     int errnum;
 };
 
-inline int poll(zmq_pollitem_t *items_, size_t nitems_, long timeout_ = -1)
+namespace detail {
+inline int poll(zmq_pollitem_t *items_, size_t nitems_, long timeout_)
 {
     int rc = zmq_poll(items_, static_cast<int>(nitems_), timeout_);
     if (rc < 0)
         throw error_t();
     return rc;
 }
+}
+
+#ifdef ZMQ_CPP11
+ZMQ_DEPRECATED("from 4.8.0, use poll taking std::chrono::duration instead of long")
+inline int poll(zmq_pollitem_t *items_, size_t nitems_, long timeout_)
+#else
+inline int poll(zmq_pollitem_t *items_, size_t nitems_, long timeout_ = -1)
+#endif
+{
+    return detail::poll(items_, nitems_, timeout_);
+}
 
 ZMQ_DEPRECATED("from 4.3.1, use poll taking non-const items")
 inline int poll(zmq_pollitem_t const *items_, size_t nitems_, long timeout_ = -1)
 {
-    return poll(const_cast<zmq_pollitem_t *>(items_), nitems_, timeout_);
+    return detail::poll(const_cast<zmq_pollitem_t *>(items_), nitems_, timeout_);
 }
 
 #ifdef ZMQ_CPP11
@@ -280,7 +333,7 @@ ZMQ_DEPRECATED("from 4.3.1, use poll taking non-const items")
 inline int
 poll(zmq_pollitem_t const *items, size_t nitems, std::chrono::milliseconds timeout)
 {
-    return poll(const_cast<zmq_pollitem_t *>(items), nitems,
+    return detail::poll(const_cast<zmq_pollitem_t *>(items), nitems,
                 static_cast<long>(timeout.count()));
 }
 
@@ -288,31 +341,39 @@ ZMQ_DEPRECATED("from 4.3.1, use poll taking non-const items")
 inline int poll(std::vector<zmq_pollitem_t> const &items,
                 std::chrono::milliseconds timeout)
 {
-    return poll(const_cast<zmq_pollitem_t *>(items.data()), items.size(),
+    return detail::poll(const_cast<zmq_pollitem_t *>(items.data()), items.size(),
                 static_cast<long>(timeout.count()));
 }
 
 ZMQ_DEPRECATED("from 4.3.1, use poll taking non-const items")
 inline int poll(std::vector<zmq_pollitem_t> const &items, long timeout_ = -1)
 {
-    return poll(const_cast<zmq_pollitem_t *>(items.data()), items.size(), timeout_);
+    return detail::poll(const_cast<zmq_pollitem_t *>(items.data()), items.size(), timeout_);
 }
 
 inline int
-poll(zmq_pollitem_t *items, size_t nitems, std::chrono::milliseconds timeout)
+poll(zmq_pollitem_t *items, size_t nitems, std::chrono::milliseconds timeout = std::chrono::milliseconds{-1})
 {
-    return poll(items, nitems, static_cast<long>(timeout.count()));
+    return detail::poll(items, nitems, static_cast<long>(timeout.count()));
 }
 
 inline int poll(std::vector<zmq_pollitem_t> &items,
-                std::chrono::milliseconds timeout)
+                std::chrono::milliseconds timeout = std::chrono::milliseconds{-1})
 {
-    return poll(items.data(), items.size(), static_cast<long>(timeout.count()));
+    return detail::poll(items.data(), items.size(), static_cast<long>(timeout.count()));
 }
 
-inline int poll(std::vector<zmq_pollitem_t> &items, long timeout_ = -1)
+ZMQ_DEPRECATED("from 4.3.1, use poll taking std::chrono::duration instead of long")
+inline int poll(std::vector<zmq_pollitem_t> &items, long timeout_)
 {
-    return poll(items.data(), items.size(), timeout_);
+    return detail::poll(items.data(), items.size(), timeout_);
+}
+
+template<std::size_t SIZE>
+inline int poll(std::array<zmq_pollitem_t, SIZE> &items,
+                std::chrono::milliseconds timeout = std::chrono::milliseconds{-1})
+{
+    return detail::poll(items.data(), items.size(), static_cast<long>(timeout.count()));
 }
 #endif
 
@@ -329,6 +390,20 @@ inline std::tuple<int, int, int> version()
     zmq_version(&std::get<0>(v), &std::get<1>(v), &std::get<2>(v));
     return v;
 }
+
+#if !defined(ZMQ_CPP11_PARTIAL)
+namespace detail
+{
+template<class T> struct is_char_type
+{
+    // true if character type for string literals in C++11
+    static constexpr bool value =
+      std::is_same<T, char>::value || std::is_same<T, wchar_t>::value
+      || std::is_same<T, char16_t>::value || std::is_same<T, char32_t>::value;
+};
+}
+#endif
+
 #endif
 
 class message_t
@@ -365,7 +440,11 @@ class message_t
         int rc = zmq_msg_init_size(&msg, size_);
         if (rc != 0)
             throw error_t();
-        memcpy(data(), data_, size_);
+        if (size_) {
+            // this constructor allows (nullptr, 0),
+            // memcpy with a null pointer is UB
+            memcpy(data(), data_, size_);
+        }
     }
 
     message_t(void *data_, size_t size_, free_fn *ffn_, void *hint_ = ZMQ_NULLPTR)
@@ -375,16 +454,40 @@ class message_t
             throw error_t();
     }
 
+    // overload set of string-like types and generic containers
 #if defined(ZMQ_CPP11) && !defined(ZMQ_CPP11_PARTIAL)
+    // NOTE this constructor will include the null terminator
+    // when called with a string literal.
+    // An overload taking const char* can not be added because
+    // it would be preferred over this function and break compatiblity.
+    template<
+      class Char,
+      size_t N,
+      typename = typename std::enable_if<detail::is_char_type<Char>::value>::type>
+    ZMQ_DEPRECATED("from 4.7.0, use constructors taking iterators, (pointer, size) "
+                   "or strings instead")
+    explicit message_t(const Char (&data)[N]) :
+        message_t(detail::ranges::begin(data), detail::ranges::end(data))
+    {
+    }
+
     template<class Range,
              typename = typename std::enable_if<
                detail::is_range<Range>::value
                && ZMQ_IS_TRIVIALLY_COPYABLE(detail::range_value_t<Range>)
+               && !detail::is_char_type<detail::range_value_t<Range>>::value
                && !std::is_same<Range, message_t>::value>::type>
     explicit message_t(const Range &rng) :
         message_t(detail::ranges::begin(rng), detail::ranges::end(rng))
     {
     }
+
+    explicit message_t(const std::string &str) : message_t(str.data(), str.size()) {}
+
+#if CPPZMQ_HAS_STRING_VIEW
+    explicit message_t(std::string_view str) : message_t(str.data(), str.size()) {}
+#endif
+
 #endif
 
 #ifdef ZMQ_HAS_RVALUE_REFS
@@ -435,6 +538,11 @@ class message_t
         if (rc != 0)
             throw error_t();
         memcpy(data(), data_, size_);
+    }
+    
+    void rebuild(const std::string &str)
+    {
+        rebuild(str.data(), str.size());
     }
 
     void rebuild(void *data_, size_t size_, free_fn *ffn_, void *hint_ = ZMQ_NULLPTR)
@@ -569,7 +677,7 @@ class message_t
     {
         return std::string(static_cast<const char *>(data()), size());
     }
-#ifdef ZMQ_CPP17
+#if CPPZMQ_HAS_STRING_VIEW
     // interpret message content as a string
     std::string_view to_string_view() const noexcept
     {
@@ -763,7 +871,7 @@ class context_t
 
         int rc;
         do {
-            rc = zmq_ctx_destroy(ptr);
+            rc = zmq_ctx_term(ptr);
         } while (rc == -1 && errno == EINTR);
 
         ZMQ_ASSERT(rc == 0);
@@ -788,6 +896,9 @@ class context_t
 
     ZMQ_EXPLICIT operator void const *() const ZMQ_NOTHROW { return ptr; }
 
+    ZMQ_NODISCARD void *handle() ZMQ_NOTHROW { return ptr; }
+
+    ZMQ_DEPRECATED("from 4.7.0, use handle() != nullptr instead")
     operator bool() const ZMQ_NOTHROW { return ptr != ZMQ_NULLPTR; }
 
     void swap(context_t &other) ZMQ_NOTHROW { std::swap(ptr, other.ptr); }
@@ -817,7 +928,7 @@ struct recv_buffer_size
     }
 };
 
-#if defined(ZMQ_HAS_OPTIONAL) && (ZMQ_HAS_OPTIONAL > 0)
+#if CPPZMQ_HAS_OPTIONAL
 
 using send_result_t = std::optional<size_t>;
 using recv_result_t = std::optional<size_t>;
@@ -976,7 +1087,7 @@ class mutable_buffer
     constexpr mutable_buffer() noexcept : _data(nullptr), _size(0) {}
     constexpr mutable_buffer(void *p, size_t n) noexcept : _data(p), _size(n)
     {
-#ifdef ZMQ_CPP14
+#ifdef ZMQ_EXTENDED_CONSTEXPR
         assert(p != nullptr || n == 0);
 #endif
     }
@@ -1013,7 +1124,7 @@ class const_buffer
     constexpr const_buffer() noexcept : _data(nullptr), _size(0) {}
     constexpr const_buffer(const void *p, size_t n) noexcept : _data(p), _size(n)
     {
-#ifdef ZMQ_CPP14
+#ifdef ZMQ_EXTENDED_CONSTEXPR
         assert(p != nullptr || n == 0);
 #endif
     }
@@ -1224,7 +1335,7 @@ const_buffer buffer(const std::basic_string<T, Traits, Allocator> &data,
     return detail::buffer_contiguous_sequence(data, n_bytes);
 }
 
-#if defined(ZMQ_HAS_STRING_VIEW) && (ZMQ_HAS_STRING_VIEW > 0)
+#if CPPZMQ_HAS_STRING_VIEW
 // std::basic_string_view
 template<class T, class Traits>
 const_buffer buffer(std::basic_string_view<T, Traits> data) noexcept
@@ -1245,7 +1356,7 @@ template<class Char, size_t N>
 constexpr const_buffer str_buffer(const Char (&data)[N]) noexcept
 {
     static_assert(detail::is_pod_like<Char>::value, "Char must be POD");
-#ifdef ZMQ_CPP14
+#ifdef ZMQ_EXTENDED_CONSTEXPR
     assert(data[N - 1] == Char{0});
 #endif
     return const_buffer(static_cast<const Char *>(data), (N - 1) * sizeof(Char));
@@ -1253,28 +1364,57 @@ constexpr const_buffer str_buffer(const Char (&data)[N]) noexcept
 
 namespace literals
 {
-constexpr const_buffer operator"" _zbuf(const char *str, size_t len) noexcept
+constexpr const_buffer operator""_zbuf(const char *str, size_t len) noexcept
 {
     return const_buffer(str, len * sizeof(char));
 }
-constexpr const_buffer operator"" _zbuf(const wchar_t *str, size_t len) noexcept
+constexpr const_buffer operator""_zbuf(const wchar_t *str, size_t len) noexcept
 {
     return const_buffer(str, len * sizeof(wchar_t));
 }
-constexpr const_buffer operator"" _zbuf(const char16_t *str, size_t len) noexcept
+constexpr const_buffer operator""_zbuf(const char16_t *str, size_t len) noexcept
 {
     return const_buffer(str, len * sizeof(char16_t));
 }
-constexpr const_buffer operator"" _zbuf(const char32_t *str, size_t len) noexcept
+constexpr const_buffer operator""_zbuf(const char32_t *str, size_t len) noexcept
 {
     return const_buffer(str, len * sizeof(char32_t));
 }
 }
 
-#endif // ZMQ_CPP11
-
-
 #ifdef ZMQ_CPP11
+enum class socket_type : int
+{
+    req = ZMQ_REQ,
+    rep = ZMQ_REP,
+    dealer = ZMQ_DEALER,
+    router = ZMQ_ROUTER,
+    pub = ZMQ_PUB,
+    sub = ZMQ_SUB,
+    xpub = ZMQ_XPUB,
+    xsub = ZMQ_XSUB,
+    push = ZMQ_PUSH,
+    pull = ZMQ_PULL,
+#if defined(ZMQ_BUILD_DRAFT_API) && ZMQ_VERSION >= ZMQ_MAKE_VERSION(4, 2, 0)
+    server = ZMQ_SERVER,
+    client = ZMQ_CLIENT,
+    radio = ZMQ_RADIO,
+    dish = ZMQ_DISH,
+    gather = ZMQ_GATHER,
+    scatter = ZMQ_SCATTER,
+    dgram = ZMQ_DGRAM,
+#endif
+#if defined(ZMQ_BUILD_DRAFT_API) && ZMQ_VERSION >= ZMQ_MAKE_VERSION(4, 3, 3)
+    peer = ZMQ_PEER,
+    channel = ZMQ_CHANNEL,
+#endif
+#if ZMQ_VERSION_MAJOR >= 4
+    stream = ZMQ_STREAM,
+#endif
+    pair = ZMQ_PAIR
+};
+#endif
+
 namespace sockopt
 {
 // There are two types of options,
@@ -1298,30 +1438,22 @@ template<int Opt, int NullTerm = 1> struct array_option
 
 #define ZMQ_DEFINE_INTEGRAL_OPT(OPT, NAME, TYPE)                                    \
     using NAME##_t = integral_option<OPT, TYPE, false>;                             \
-    ZMQ_INLINE_VAR ZMQ_CONSTEXPR_VAR NAME##_t NAME
+    ZMQ_INLINE_VAR ZMQ_CONSTEXPR_VAR NAME##_t NAME {}
 #define ZMQ_DEFINE_INTEGRAL_BOOL_UNIT_OPT(OPT, NAME, TYPE)                          \
     using NAME##_t = integral_option<OPT, TYPE, true>;                              \
-    ZMQ_INLINE_VAR ZMQ_CONSTEXPR_VAR NAME##_t NAME
+    ZMQ_INLINE_VAR ZMQ_CONSTEXPR_VAR NAME##_t NAME {}
 #define ZMQ_DEFINE_ARRAY_OPT(OPT, NAME)                                             \
     using NAME##_t = array_option<OPT>;                                             \
-    ZMQ_INLINE_VAR ZMQ_CONSTEXPR_VAR NAME##_t NAME
+    ZMQ_INLINE_VAR ZMQ_CONSTEXPR_VAR NAME##_t NAME {}
 #define ZMQ_DEFINE_ARRAY_OPT_BINARY(OPT, NAME)                                      \
     using NAME##_t = array_option<OPT, 0>;                                          \
-    ZMQ_INLINE_VAR ZMQ_CONSTEXPR_VAR NAME##_t NAME
+    ZMQ_INLINE_VAR ZMQ_CONSTEXPR_VAR NAME##_t NAME {}
 #define ZMQ_DEFINE_ARRAY_OPT_BIN_OR_Z85(OPT, NAME)                                  \
     using NAME##_t = array_option<OPT, 2>;                                          \
-    ZMQ_INLINE_VAR ZMQ_CONSTEXPR_VAR NAME##_t NAME
+    ZMQ_INLINE_VAR ZMQ_CONSTEXPR_VAR NAME##_t NAME {}
 
-// duplicate definition from libzmq 4.3.3
-#if defined _WIN32
-#if defined _WIN64
-typedef unsigned __int64 cppzmq_fd_t;
-#else
-typedef unsigned int cppzmq_fd_t;
-#endif
-#else
-typedef int cppzmq_fd_t;
-#endif
+// deprecated, use zmq::fd_t
+using cppzmq_fd_t = ::zmq::fd_t;
 
 #ifdef ZMQ_AFFINITY
 ZMQ_DEFINE_INTEGRAL_OPT(ZMQ_AFFINITY, affinity, uint64_t);
@@ -1331,6 +1463,9 @@ ZMQ_DEFINE_INTEGRAL_OPT(ZMQ_BACKLOG, backlog, int);
 #endif
 #ifdef ZMQ_BINDTODEVICE
 ZMQ_DEFINE_ARRAY_OPT_BINARY(ZMQ_BINDTODEVICE, bindtodevice);
+#endif
+#ifdef ZMQ_BUSY_POLL
+ZMQ_DEFINE_INTEGRAL_BOOL_UNIT_OPT(ZMQ_BUSY_POLL, busy_poll, int);
 #endif
 #ifdef ZMQ_CONFLATE
 ZMQ_DEFINE_INTEGRAL_BOOL_UNIT_OPT(ZMQ_CONFLATE, conflate, int);
@@ -1353,11 +1488,14 @@ ZMQ_DEFINE_INTEGRAL_BOOL_UNIT_OPT(ZMQ_CURVE_SERVER, curve_server, int);
 #ifdef ZMQ_CURVE_SERVERKEY
 ZMQ_DEFINE_ARRAY_OPT_BIN_OR_Z85(ZMQ_CURVE_SERVERKEY, curve_serverkey);
 #endif
+#ifdef ZMQ_DISCONNECT_MSG
+ZMQ_DEFINE_ARRAY_OPT_BINARY(ZMQ_DISCONNECT_MSG, disconnect_msg);
+#endif
 #ifdef ZMQ_EVENTS
 ZMQ_DEFINE_INTEGRAL_OPT(ZMQ_EVENTS, events, int);
 #endif
 #ifdef ZMQ_FD
-ZMQ_DEFINE_INTEGRAL_OPT(ZMQ_FD, fd, cppzmq_fd_t);
+ZMQ_DEFINE_INTEGRAL_OPT(ZMQ_FD, fd, ::zmq::fd_t);
 #endif
 #ifdef ZMQ_GSSAPI_PLAINTEXT
 ZMQ_DEFINE_INTEGRAL_BOOL_UNIT_OPT(ZMQ_GSSAPI_PLAINTEXT, gssapi_plaintext, int);
@@ -1393,6 +1531,9 @@ ZMQ_DEFINE_INTEGRAL_OPT(ZMQ_HEARTBEAT_TIMEOUT, heartbeat_timeout, int);
 #ifdef ZMQ_HEARTBEAT_TTL
 ZMQ_DEFINE_INTEGRAL_OPT(ZMQ_HEARTBEAT_TTL, heartbeat_ttl, int);
 #endif
+#ifdef ZMQ_HELLO_MSG
+ZMQ_DEFINE_ARRAY_OPT_BINARY(ZMQ_HELLO_MSG, hello_msg);
+#endif
 #ifdef ZMQ_IMMEDIATE
 ZMQ_DEFINE_INTEGRAL_BOOL_UNIT_OPT(ZMQ_IMMEDIATE, immediate, int);
 #endif
@@ -1426,6 +1567,9 @@ ZMQ_DEFINE_INTEGRAL_BOOL_UNIT_OPT(ZMQ_MULTICAST_LOOP, multicast_loop, int);
 #ifdef ZMQ_MULTICAST_MAXTPDU
 ZMQ_DEFINE_INTEGRAL_OPT(ZMQ_MULTICAST_MAXTPDU, multicast_maxtpdu, int);
 #endif
+#ifdef ZMQ_ONLY_FIRST_SUBSCRIBE
+ZMQ_DEFINE_INTEGRAL_BOOL_UNIT_OPT(ZMQ_ONLY_FIRST_SUBSCRIBE, only_first_subscribe, int);
+#endif
 #ifdef ZMQ_PLAIN_SERVER
 ZMQ_DEFINE_INTEGRAL_BOOL_UNIT_OPT(ZMQ_PLAIN_SERVER, plain_server, int);
 #endif
@@ -1434,6 +1578,9 @@ ZMQ_DEFINE_ARRAY_OPT(ZMQ_PLAIN_PASSWORD, plain_password);
 #endif
 #ifdef ZMQ_PLAIN_USERNAME
 ZMQ_DEFINE_ARRAY_OPT(ZMQ_PLAIN_USERNAME, plain_username);
+#endif
+#ifdef ZMQ_PRIORITY
+ZMQ_DEFINE_INTEGRAL_OPT(ZMQ_PRIORITY, priority, int);
 #endif
 #ifdef ZMQ_USE_FD
 ZMQ_DEFINE_INTEGRAL_OPT(ZMQ_USE_FD, use_fd, int);
@@ -1462,6 +1609,9 @@ ZMQ_DEFINE_INTEGRAL_OPT(ZMQ_RECONNECT_IVL, reconnect_ivl, int);
 #ifdef ZMQ_RECONNECT_IVL_MAX
 ZMQ_DEFINE_INTEGRAL_OPT(ZMQ_RECONNECT_IVL_MAX, reconnect_ivl_max, int);
 #endif
+#ifdef ZMQ_RECONNECT_STOP
+ZMQ_DEFINE_INTEGRAL_OPT(ZMQ_RECONNECT_STOP, reconnect_stop, int);
+#endif
 #ifdef ZMQ_RECOVERY_IVL
 ZMQ_DEFINE_INTEGRAL_OPT(ZMQ_RECOVERY_IVL, recovery_ivl, int);
 #endif
@@ -1480,6 +1630,9 @@ ZMQ_DEFINE_INTEGRAL_BOOL_UNIT_OPT(ZMQ_ROUTER_MANDATORY, router_mandatory, int);
 #ifdef ZMQ_ROUTER_NOTIFY
 ZMQ_DEFINE_INTEGRAL_OPT(ZMQ_ROUTER_NOTIFY, router_notify, int);
 #endif
+#ifdef ZMQ_ROUTER_RAW
+ZMQ_DEFINE_INTEGRAL_OPT(ZMQ_ROUTER_RAW, router_raw, int);
+#endif
 #ifdef ZMQ_ROUTING_ID
 ZMQ_DEFINE_ARRAY_OPT_BINARY(ZMQ_ROUTING_ID, routing_id);
 #endif
@@ -1492,8 +1645,14 @@ ZMQ_DEFINE_INTEGRAL_OPT(ZMQ_SNDHWM, sndhwm, int);
 #ifdef ZMQ_SNDTIMEO
 ZMQ_DEFINE_INTEGRAL_OPT(ZMQ_SNDTIMEO, sndtimeo, int);
 #endif
+#ifdef ZMQ_SOCKS_PASSWORD
+ZMQ_DEFINE_ARRAY_OPT(ZMQ_SOCKS_PASSWORD, socks_password);
+#endif
 #ifdef ZMQ_SOCKS_PROXY
 ZMQ_DEFINE_ARRAY_OPT(ZMQ_SOCKS_PROXY, socks_proxy);
+#endif
+#ifdef ZMQ_SOCKS_USERNAME
+ZMQ_DEFINE_ARRAY_OPT(ZMQ_SOCKS_USERNAME, socks_username);
 #endif
 #ifdef ZMQ_STREAM_NOTIFY
 ZMQ_DEFINE_INTEGRAL_BOOL_UNIT_OPT(ZMQ_STREAM_NOTIFY, stream_notify, int);
@@ -1524,7 +1683,10 @@ ZMQ_DEFINE_INTEGRAL_OPT(ZMQ_TOS, tos, int);
 #endif
 #ifdef ZMQ_TYPE
 ZMQ_DEFINE_INTEGRAL_OPT(ZMQ_TYPE, type, int);
-#endif
+#ifdef ZMQ_CPP11
+ZMQ_DEFINE_INTEGRAL_OPT(ZMQ_TYPE, socket_type, socket_type);
+#endif // ZMQ_CPP11
+#endif // ZMQ_TYPE
 #ifdef ZMQ_UNSUBSCRIBE
 ZMQ_DEFINE_ARRAY_OPT(ZMQ_UNSUBSCRIBE, unsubscribe);
 #endif
@@ -1548,6 +1710,9 @@ ZMQ_DEFINE_INTEGRAL_BOOL_UNIT_OPT(ZMQ_XPUB_VERBOSER, xpub_verboser, int);
 #endif
 #ifdef ZMQ_XPUB_MANUAL
 ZMQ_DEFINE_INTEGRAL_BOOL_UNIT_OPT(ZMQ_XPUB_MANUAL, xpub_manual, int);
+#endif
+#ifdef ZMQ_XPUB_MANUAL_LAST_VALUE
+ZMQ_DEFINE_INTEGRAL_BOOL_UNIT_OPT(ZMQ_XPUB_MANUAL_LAST_VALUE, xpub_manual_last_value, int);
 #endif
 #ifdef ZMQ_XPUB_NODROP
 ZMQ_DEFINE_INTEGRAL_BOOL_UNIT_OPT(ZMQ_XPUB_NODROP, xpub_nodrop, int);
@@ -1651,7 +1816,7 @@ class socket_base
         set_option(Opt, buf.data(), buf.size());
     }
 
-#ifdef ZMQ_CPP17
+#if CPPZMQ_HAS_STRING_VIEW
     // Set array socket option, e.g.
     // `socket.set(zmq::sockopt::routing_id, id_str)`
     template<int Opt, int NullTerm>
@@ -1666,7 +1831,7 @@ class socket_base
     template<int Opt, class T, bool BoolUnit>
     ZMQ_NODISCARD T get(sockopt::integral_option<Opt, T, BoolUnit>) const
     {
-        static_assert(std::is_integral<T>::value, "T must be integral");
+        static_assert(std::is_scalar<T>::value, "T must be scalar");
         T val;
         size_t size = sizeof val;
         get_option(Opt, &val, &size);
@@ -1693,17 +1858,19 @@ class socket_base
     ZMQ_NODISCARD std::string get(sockopt::array_option<Opt, NullTerm>,
                                   size_t init_size = 1024) const
     {
-        if (NullTerm == 2 && init_size == 1024) {
-            init_size = 41; // get as Z85 string
+        if ZMQ_CONSTEXPR_IF (NullTerm == 2) {
+            if (init_size == 1024) {
+                init_size = 41; // get as Z85 string
+            }
         }
         std::string str(init_size, '\0');
         size_t size = get(sockopt::array_option<Opt>{}, buffer(str));
-        if (NullTerm == 1) {
+        if ZMQ_CONSTEXPR_IF (NullTerm == 1) {
             if (size > 0) {
                 assert(str[size - 1] == '\0');
                 --size;
             }
-        } else if (NullTerm == 2) {
+        } else if ZMQ_CONSTEXPR_IF (NullTerm == 2) {
             assert(size == 32 || size == 41);
             if (size == 41) {
                 assert(str[size - 1] == '\0');
@@ -1751,6 +1918,7 @@ class socket_base
             throw error_t();
     }
 
+    ZMQ_DEPRECATED("from 4.7.1, use handle() != nullptr or operator bool")
     bool connected() const ZMQ_NOTHROW { return (_handle != ZMQ_NULLPTR); }
 
     ZMQ_CPP11_DEPRECATED("from 4.3.1, use send taking a const_buffer and send_flags")
@@ -1932,32 +2100,6 @@ class socket_base
 };
 } // namespace detail
 
-#ifdef ZMQ_CPP11
-enum class socket_type : int
-{
-    req = ZMQ_REQ,
-    rep = ZMQ_REP,
-    dealer = ZMQ_DEALER,
-    router = ZMQ_ROUTER,
-    pub = ZMQ_PUB,
-    sub = ZMQ_SUB,
-    xpub = ZMQ_XPUB,
-    xsub = ZMQ_XSUB,
-    push = ZMQ_PUSH,
-    pull = ZMQ_PULL,
-#if defined(ZMQ_BUILD_DRAFT_API) && ZMQ_VERSION >= ZMQ_MAKE_VERSION(4, 2, 0)
-    server = ZMQ_SERVER,
-    client = ZMQ_CLIENT,
-    radio = ZMQ_RADIO,
-    dish = ZMQ_DISH,
-#endif
-#if ZMQ_VERSION_MAJOR >= 4
-    stream = ZMQ_STREAM,
-#endif
-    pair = ZMQ_PAIR
-};
-#endif
-
 struct from_handle_t
 {
     struct _private
@@ -2003,27 +2145,27 @@ inline bool operator!=(std::nullptr_t /*p*/, socket_ref sr) ZMQ_NOTHROW
 }
 #endif
 
-inline bool operator==(socket_ref a, socket_ref b) ZMQ_NOTHROW
+inline bool operator==(const detail::socket_base& a, const detail::socket_base& b) ZMQ_NOTHROW
 {
-    return std::equal_to<void *>()(a.handle(), b.handle());
+    return std::equal_to<const void *>()(a.handle(), b.handle());
 }
-inline bool operator!=(socket_ref a, socket_ref b) ZMQ_NOTHROW
+inline bool operator!=(const detail::socket_base& a, const detail::socket_base& b) ZMQ_NOTHROW
 {
     return !(a == b);
 }
-inline bool operator<(socket_ref a, socket_ref b) ZMQ_NOTHROW
+inline bool operator<(const detail::socket_base& a, const detail::socket_base& b) ZMQ_NOTHROW
 {
-    return std::less<void *>()(a.handle(), b.handle());
+    return std::less<const void *>()(a.handle(), b.handle());
 }
-inline bool operator>(socket_ref a, socket_ref b) ZMQ_NOTHROW
+inline bool operator>(const detail::socket_base& a, const detail::socket_base& b) ZMQ_NOTHROW
 {
     return b < a;
 }
-inline bool operator<=(socket_ref a, socket_ref b) ZMQ_NOTHROW
+inline bool operator<=(const detail::socket_base& a, const detail::socket_base& b) ZMQ_NOTHROW
 {
     return !(a > b);
 }
-inline bool operator>=(socket_ref a, socket_ref b) ZMQ_NOTHROW
+inline bool operator>=(const detail::socket_base& a, const detail::socket_base& b) ZMQ_NOTHROW
 {
     return !(a < b);
 }
@@ -2053,8 +2195,8 @@ class socket_t : public detail::socket_base
     socket_t() ZMQ_NOTHROW : detail::socket_base(ZMQ_NULLPTR), ctxptr(ZMQ_NULLPTR) {}
 
     socket_t(context_t &context_, int type_) :
-        detail::socket_base(zmq_socket(static_cast<void *>(context_), type_)),
-        ctxptr(static_cast<void *>(context_))
+        detail::socket_base(zmq_socket(context_.handle(), type_)),
+        ctxptr(context_.handle())
     {
         if (_handle == ZMQ_NULLPTR)
             throw error_t();
@@ -2078,6 +2220,7 @@ class socket_t : public detail::socket_base
     {
         close();
         std::swap(_handle, rhs._handle);
+        std::swap(ctxptr, rhs.ctxptr);
         return *this;
     }
 #endif
@@ -2096,6 +2239,7 @@ class socket_t : public detail::socket_base
         int rc = zmq_close(_handle);
         ZMQ_ASSERT(rc == 0);
         _handle = ZMQ_NULLPTR;
+        ctxptr = ZMQ_NULLPTR;
     }
 
     void swap(socket_t &other) ZMQ_NOTHROW
@@ -2117,6 +2261,8 @@ class socket_t : public detail::socket_base
         detail::socket_base(zmq_socket(context_, type_)), ctxptr(context_)
     {
         if (_handle == ZMQ_NULLPTR)
+            throw error_t();
+        if (ctxptr == ZMQ_NULLPTR)
             throw error_t();
     }
 };
@@ -2225,124 +2371,17 @@ class monitor_t
     {
         assert(_monitor_socket);
 
-        zmq_msg_t eventMsg;
-        zmq_msg_init(&eventMsg);
-
         zmq::pollitem_t items[] = {
           {_monitor_socket.handle(), 0, ZMQ_POLLIN, 0},
         };
 
+        #ifdef ZMQ_CPP11
+        zmq::poll(&items[0], 1, std::chrono::milliseconds(timeout));
+        #else
         zmq::poll(&items[0], 1, timeout);
+        #endif
 
-        if (items[0].revents & ZMQ_POLLIN) {
-            int rc = zmq_msg_recv(&eventMsg, _monitor_socket.handle(), 0);
-            if (rc == -1 && zmq_errno() == ETERM)
-                return false;
-            assert(rc != -1);
-
-        } else {
-            zmq_msg_close(&eventMsg);
-            return false;
-        }
-
-#if ZMQ_VERSION_MAJOR >= 4
-        const char *data = static_cast<const char *>(zmq_msg_data(&eventMsg));
-        zmq_event_t msgEvent;
-        memcpy(&msgEvent.event, data, sizeof(uint16_t));
-        data += sizeof(uint16_t);
-        memcpy(&msgEvent.value, data, sizeof(int32_t));
-        zmq_event_t *event = &msgEvent;
-#else
-        zmq_event_t *event = static_cast<zmq_event_t *>(zmq_msg_data(&eventMsg));
-#endif
-
-#ifdef ZMQ_NEW_MONITOR_EVENT_LAYOUT
-        zmq_msg_t addrMsg;
-        zmq_msg_init(&addrMsg);
-        int rc = zmq_msg_recv(&addrMsg, _monitor_socket.handle(), 0);
-        if (rc == -1 && zmq_errno() == ETERM) {
-            zmq_msg_close(&eventMsg);
-            return false;
-        }
-
-        assert(rc != -1);
-        const char *str = static_cast<const char *>(zmq_msg_data(&addrMsg));
-        std::string address(str, str + zmq_msg_size(&addrMsg));
-        zmq_msg_close(&addrMsg);
-#else
-        // Bit of a hack, but all events in the zmq_event_t union have the same layout so this will work for all event types.
-        std::string address = event->data.connected.addr;
-#endif
-
-#ifdef ZMQ_EVENT_MONITOR_STOPPED
-        if (event->event == ZMQ_EVENT_MONITOR_STOPPED) {
-            zmq_msg_close(&eventMsg);
-            return false;
-        }
-
-#endif
-
-        switch (event->event) {
-            case ZMQ_EVENT_CONNECTED:
-                on_event_connected(*event, address.c_str());
-                break;
-            case ZMQ_EVENT_CONNECT_DELAYED:
-                on_event_connect_delayed(*event, address.c_str());
-                break;
-            case ZMQ_EVENT_CONNECT_RETRIED:
-                on_event_connect_retried(*event, address.c_str());
-                break;
-            case ZMQ_EVENT_LISTENING:
-                on_event_listening(*event, address.c_str());
-                break;
-            case ZMQ_EVENT_BIND_FAILED:
-                on_event_bind_failed(*event, address.c_str());
-                break;
-            case ZMQ_EVENT_ACCEPTED:
-                on_event_accepted(*event, address.c_str());
-                break;
-            case ZMQ_EVENT_ACCEPT_FAILED:
-                on_event_accept_failed(*event, address.c_str());
-                break;
-            case ZMQ_EVENT_CLOSED:
-                on_event_closed(*event, address.c_str());
-                break;
-            case ZMQ_EVENT_CLOSE_FAILED:
-                on_event_close_failed(*event, address.c_str());
-                break;
-            case ZMQ_EVENT_DISCONNECTED:
-                on_event_disconnected(*event, address.c_str());
-                break;
-#ifdef ZMQ_BUILD_DRAFT_API
-#if ZMQ_VERSION >= ZMQ_MAKE_VERSION(4, 2, 3)
-            case ZMQ_EVENT_HANDSHAKE_FAILED_NO_DETAIL:
-                on_event_handshake_failed_no_detail(*event, address.c_str());
-                break;
-            case ZMQ_EVENT_HANDSHAKE_FAILED_PROTOCOL:
-                on_event_handshake_failed_protocol(*event, address.c_str());
-                break;
-            case ZMQ_EVENT_HANDSHAKE_FAILED_AUTH:
-                on_event_handshake_failed_auth(*event, address.c_str());
-                break;
-            case ZMQ_EVENT_HANDSHAKE_SUCCEEDED:
-                on_event_handshake_succeeded(*event, address.c_str());
-                break;
-#elif ZMQ_VERSION >= ZMQ_MAKE_VERSION(4, 2, 1)
-            case ZMQ_EVENT_HANDSHAKE_FAILED:
-                on_event_handshake_failed(*event, address.c_str());
-                break;
-            case ZMQ_EVENT_HANDSHAKE_SUCCEED:
-                on_event_handshake_succeed(*event, address.c_str());
-                break;
-#endif
-#endif
-            default:
-                on_event_unknown(*event, address.c_str());
-                break;
-        }
-        zmq_msg_close(&eventMsg);
-
-        return true;
+        return process_event(items[0].revents);
     }
 
 #ifdef ZMQ_EVENT_MONITOR_STOPPED
@@ -2353,6 +2392,8 @@ class monitor_t
 
         _socket = socket_ref();
     }
+
+    virtual void on_monitor_stopped() {}
 #endif
     virtual void on_monitor_started() {}
     virtual void on_event_connected(const zmq_event_t &event_, const char *addr_)
@@ -2452,6 +2493,116 @@ class monitor_t
         (void) addr_;
     }
 
+  protected:    
+    bool process_event(short events)
+    {
+        zmq::message_t eventMsg;
+
+        if (events & ZMQ_POLLIN) {
+            int rc = zmq_msg_recv(eventMsg.handle(), _monitor_socket.handle(), 0);
+            if (rc == -1 && zmq_errno() == ETERM)
+                return false;
+            assert(rc != -1);
+
+        } else {
+            return false;
+        }
+
+#if ZMQ_VERSION_MAJOR >= 4
+        const char *data = static_cast<const char *>(eventMsg.data());
+        zmq_event_t msgEvent;
+        memcpy(&msgEvent.event, data, sizeof(uint16_t));
+        data += sizeof(uint16_t);
+        memcpy(&msgEvent.value, data, sizeof(int32_t));
+        zmq_event_t *event = &msgEvent;
+#else
+        zmq_event_t *event = static_cast<zmq_event_t *>(eventMsg.data());
+#endif
+
+#ifdef ZMQ_NEW_MONITOR_EVENT_LAYOUT
+        zmq::message_t addrMsg;
+        int rc = zmq_msg_recv(addrMsg.handle(), _monitor_socket.handle(), 0);
+        if (rc == -1 && zmq_errno() == ETERM) {
+            return false;
+        }
+
+        assert(rc != -1);
+        std::string address = addrMsg.to_string();
+#else
+        // Bit of a hack, but all events in the zmq_event_t union have the same layout so this will work for all event types.
+        std::string address = event->data.connected.addr;
+#endif
+
+#ifdef ZMQ_EVENT_MONITOR_STOPPED
+        if (event->event == ZMQ_EVENT_MONITOR_STOPPED) {
+            on_monitor_stopped();
+            return false;
+        }
+
+#endif
+
+        switch (event->event) {
+            case ZMQ_EVENT_CONNECTED:
+                on_event_connected(*event, address.c_str());
+                break;
+            case ZMQ_EVENT_CONNECT_DELAYED:
+                on_event_connect_delayed(*event, address.c_str());
+                break;
+            case ZMQ_EVENT_CONNECT_RETRIED:
+                on_event_connect_retried(*event, address.c_str());
+                break;
+            case ZMQ_EVENT_LISTENING:
+                on_event_listening(*event, address.c_str());
+                break;
+            case ZMQ_EVENT_BIND_FAILED:
+                on_event_bind_failed(*event, address.c_str());
+                break;
+            case ZMQ_EVENT_ACCEPTED:
+                on_event_accepted(*event, address.c_str());
+                break;
+            case ZMQ_EVENT_ACCEPT_FAILED:
+                on_event_accept_failed(*event, address.c_str());
+                break;
+            case ZMQ_EVENT_CLOSED:
+                on_event_closed(*event, address.c_str());
+                break;
+            case ZMQ_EVENT_CLOSE_FAILED:
+                on_event_close_failed(*event, address.c_str());
+                break;
+            case ZMQ_EVENT_DISCONNECTED:
+                on_event_disconnected(*event, address.c_str());
+                break;
+#if ZMQ_VERSION >= ZMQ_MAKE_VERSION(4, 3, 0) || (defined(ZMQ_BUILD_DRAFT_API) && ZMQ_VERSION >= ZMQ_MAKE_VERSION(4, 2, 3))
+            case ZMQ_EVENT_HANDSHAKE_FAILED_NO_DETAIL:
+                on_event_handshake_failed_no_detail(*event, address.c_str());
+                break;
+            case ZMQ_EVENT_HANDSHAKE_FAILED_PROTOCOL:
+                on_event_handshake_failed_protocol(*event, address.c_str());
+                break;
+            case ZMQ_EVENT_HANDSHAKE_FAILED_AUTH:
+                on_event_handshake_failed_auth(*event, address.c_str());
+                break;
+            case ZMQ_EVENT_HANDSHAKE_SUCCEEDED:
+                on_event_handshake_succeeded(*event, address.c_str());
+                break;
+#elif defined(ZMQ_BUILD_DRAFT_API) && ZMQ_VERSION >= ZMQ_MAKE_VERSION(4, 2, 1)
+            case ZMQ_EVENT_HANDSHAKE_FAILED:
+                on_event_handshake_failed(*event, address.c_str());
+                break;
+            case ZMQ_EVENT_HANDSHAKE_SUCCEED:
+                on_event_handshake_succeed(*event, address.c_str());
+                break;
+#endif
+            default:
+                on_event_unknown(*event, address.c_str());
+                break;
+        }
+
+        return true;
+    }
+
+    socket_ref monitor_socket() {return _monitor_socket;}
+
   private:
     monitor_t(const monitor_t &) ZMQ_DELETED_FUNCTION;
     void operator=(const monitor_t &) ZMQ_DELETED_FUNCTION;
@@ -2502,11 +2653,7 @@ struct no_user_data;
 template<class T = no_user_data> struct poller_event
 {
     socket_ref socket;
-#ifdef _WIN32
-    SOCKET fd;
-#else
-    int fd;
-#endif
+    ::zmq::fd_t fd;
     T *user_data;
     event_flags events;
 };
@@ -2536,9 +2683,27 @@ template<typename T = no_user_data> class poller_t
         add_impl(socket, events, nullptr);
     }
 
+    template<
+      typename Dummy = void,
+      typename =
+        typename std::enable_if<!std::is_same<T, no_user_data>::value, Dummy>::type>
+    void add(fd_t fd, event_flags events, T *user_data)
+    {
+        add_impl(fd, events, user_data);
+    }
+
+    void add(fd_t fd, event_flags events) { add_impl(fd, events, nullptr); }
+
     void remove(zmq::socket_ref socket)
     {
         if (0 != zmq_poller_remove(poller_ptr.get(), socket.handle())) {
+            throw error_t();
+        }
+    }
+
+    void remove(fd_t fd)
+    {
+        if (0 != zmq_poller_remove_fd(poller_ptr.get(), fd)) {
             throw error_t();
         }
     }
@@ -2552,9 +2717,21 @@ template<typename T = no_user_data> class poller_t
         }
     }
 
-    size_t wait_all(std::vector<event_type> &poller_events,
+    void modify(fd_t fd, event_flags events)
+    {
+        if (0
+            != zmq_poller_modify_fd(poller_ptr.get(), fd,
+                                 static_cast<short>(events))) {
+            throw error_t();
+        }
+    }
+
+    template <typename Sequence>
+    size_t wait_all(Sequence &poller_events,
                     const std::chrono::milliseconds timeout)
     {
+        static_assert(std::is_same<typename Sequence::value_type, event_type>::value,
+                      "Sequence::value_type must be of poller_t::event_type");
         int rc = zmq_poller_wait_all(
           poller_ptr.get(),
           reinterpret_cast<zmq_poller_event_t *>(poller_events.data()),
@@ -2572,6 +2749,15 @@ template<typename T = no_user_data> class poller_t
 
         throw error_t();
     }
+
+#if ZMQ_VERSION >= ZMQ_MAKE_VERSION(4, 3, 3)
+    size_t size() const noexcept
+    {
+        int rc = zmq_poller_size(const_cast<void *>(poller_ptr.get()));
+        ZMQ_ASSERT(rc >= 0);
+        return static_cast<size_t>((std::max)(rc, 0));
+    }
+#endif
 
   private:
     struct destroy_poller_t
@@ -2593,6 +2779,15 @@ template<typename T = no_user_data> class poller_t
             throw error_t();
         }
     }
+
+    void add_impl(fd_t fd, event_flags events, T *user_data)
+    {
+        if (0
+            != zmq_poller_add_fd(poller_ptr.get(), fd, user_data,
+                                 static_cast<short>(events))) {
+            throw error_t();
+        }
+    }
 };
 #endif //  defined(ZMQ_BUILD_DRAFT_API) && defined(ZMQ_CPP11) && defined(ZMQ_HAVE_POLLER)
 
@@ -2600,6 +2795,85 @@ inline std::ostream &operator<<(std::ostream &os, const message_t &msg)
 {
     return os << msg.str();
 }
+
+#if defined(ZMQ_CPP11) && defined(ZMQ_HAVE_TIMERS)
+
+class timers
+{
+  public:
+    using id_t = int;
+    using fn_t = zmq_timer_fn;
+
+#if CPPZMQ_HAS_OPTIONAL
+    using timeout_result_t = std::optional<std::chrono::milliseconds>;
+#else
+    using timeout_result_t = detail::trivial_optional<std::chrono::milliseconds>;
+#endif
+
+    timers() : _timers(zmq_timers_new())
+    {
+        if (_timers == nullptr)
+            throw error_t();
+    }
+
+    timers(const timers &other) = delete;
+    timers &operator=(const timers &other) = delete;
+
+    ~timers()
+    {
+        int rc = zmq_timers_destroy(&_timers);
+        ZMQ_ASSERT(rc == 0);
+    }
+
+    id_t add(std::chrono::milliseconds interval, zmq_timer_fn handler, void *arg)
+    {
+        id_t timer_id = zmq_timers_add(_timers, interval.count(), handler, arg);
+        if (timer_id == -1)
+            throw zmq::error_t();
+        return timer_id;
+    }
+
+    void cancel(id_t timer_id)
+    {
+        int rc = zmq_timers_cancel(_timers, timer_id);
+        if (rc == -1)
+            throw zmq::error_t();
+    }
+
+    void set_interval(id_t timer_id, std::chrono::milliseconds interval)
+    {
+        int rc = zmq_timers_set_interval(_timers, timer_id, interval.count());
+        if (rc == -1)
+            throw zmq::error_t();
+    }
+
+    void reset(id_t timer_id)
+    {
+        int rc = zmq_timers_reset(_timers, timer_id);
+        if (rc == -1)
+            throw zmq::error_t();
+    }
+
+    timeout_result_t timeout() const
+    {
+        int timeout = zmq_timers_timeout(_timers);
+        if (timeout == -1)
+            return timeout_result_t{};
+        return std::chrono::milliseconds{timeout};
+    }
+
+    void execute()
+    {
+        int rc = zmq_timers_execute(_timers);
+        if (rc == -1)
+            throw zmq::error_t();
+    }
+
+  private:
+    void *_timers;
+};
+
+#endif // defined(ZMQ_CPP11) && defined(ZMQ_HAVE_TIMERS)
 
 } // namespace zmq
 

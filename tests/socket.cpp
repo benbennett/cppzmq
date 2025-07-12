@@ -1,4 +1,4 @@
-#include <catch.hpp>
+#include <catch2/catch_all.hpp>
 #include <zmq.hpp>
 #ifdef ZMQ_CPP11
 #include <future>
@@ -58,7 +58,7 @@ TEST_CASE("socket options", "[socket]")
     socket.set(zmq::sockopt::immediate, false);
     CHECK(socket.get(zmq::sockopt::immediate) == false);
     // unit out of range
-    CHECK_THROWS_AS(socket.set(zmq::sockopt::immediate, 80), const zmq::error_t &);
+    CHECK_THROWS_AS(socket.set(zmq::sockopt::immediate, 80), zmq::error_t);
 #endif
 #ifdef ZMQ_LINGER
     socket.set(zmq::sockopt::linger, 55);
@@ -69,7 +69,7 @@ TEST_CASE("socket options", "[socket]")
     socket.set(zmq::sockopt::routing_id, "foobar");
     socket.set(zmq::sockopt::routing_id, zmq::buffer(id));
     socket.set(zmq::sockopt::routing_id, id);
-#ifdef ZMQ_CPP17
+#if CPPZMQ_HAS_STRING_VIEW
     socket.set(zmq::sockopt::routing_id, std::string_view{id});
 #endif
 
@@ -83,7 +83,7 @@ TEST_CASE("socket options", "[socket]")
     std::string id_ret_small(3, ' ');
     // truncated
     CHECK_THROWS_AS(socket.get(zmq::sockopt::routing_id, zmq::buffer(id_ret_small)),
-                    const zmq::error_t &);
+                    zmq::error_t);
 #endif
 }
 
@@ -270,8 +270,7 @@ TEST_CASE("socket check integral options", "[socket]")
     check_integral_opt_get<int>(zmq::sockopt::events, router, "events");
 #endif
 #ifdef ZMQ_FD
-    check_integral_opt_get<zmq::sockopt::cppzmq_fd_t>(zmq::sockopt::fd, router,
-                                                      "fd");
+    check_integral_opt_get<zmq::fd_t>(zmq::sockopt::fd, router, "fd");
 #endif
 #ifdef ZMQ_HANDSHAKE_IVL
     check_integral_opt<int>(zmq::sockopt::handshake_ivl, router, "handshake_ivl");
@@ -365,6 +364,10 @@ TEST_CASE("socket check integral options", "[socket]")
     check_integral_opt<int>(zmq::sockopt::router_mandatory, router,
                             "router_mandatory", true);
 #endif
+#ifdef ZMQ_ROUTER_RAW
+    check_integral_opt<int>(zmq::sockopt::router_raw, router, "router_raw", 
+                            true);
+#endif
 #ifdef ZMQ_ROUTER_NOTIFY
     check_integral_opt<int>(zmq::sockopt::router_notify, router, "router_notify");
 #endif
@@ -407,7 +410,10 @@ TEST_CASE("socket check integral options", "[socket]")
 #endif
 #ifdef ZMQ_TYPE
     check_integral_opt_get<int>(zmq::sockopt::type, router, "type");
-#endif
+#ifdef ZMQ_CPP11
+    check_integral_opt_get<zmq::socket_type>(zmq::sockopt::socket_type, router, "socket_type");
+#endif // ZMQ_CPP11
+#endif // ZMQ_TYPE
 
 #ifdef ZMQ_HAVE_VMCI
 #ifdef ZMQ_VMCI_BUFFER_SIZE
@@ -544,7 +550,7 @@ TEST_CASE("socket send exception", "[socket]")
     s.bind("inproc://test");
 
     std::vector<char> buf(4);
-    CHECK_THROWS_AS(s.send(zmq::buffer(buf)), const zmq::error_t &);
+    CHECK_THROWS_AS(s.send(zmq::buffer(buf)), zmq::error_t);
 }
 
 TEST_CASE("socket recv none", "[socket]")
@@ -632,7 +638,7 @@ TEST_CASE("socket recv dontwait", "[socket]")
     zmq::message_t msg;
     auto resm = s.recv(msg, flags);
     CHECK(!resm);
-    CHECK_THROWS_AS(resm.value(), const std::exception &);
+    CHECK_THROWS_AS(resm.value(), std::exception);
     CHECK(msg.size() == 0);
 }
 
@@ -643,7 +649,7 @@ TEST_CASE("socket recv exception", "[socket]")
     s.bind("inproc://test");
 
     std::vector<char> buf(4);
-    CHECK_THROWS_AS(s.recv(zmq::buffer(buf)), const zmq::error_t &);
+    CHECK_THROWS_AS(s.recv(zmq::buffer(buf)), zmq::error_t);
 }
 
 TEST_CASE("socket proxy", "[socket]")
