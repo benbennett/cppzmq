@@ -1424,7 +1424,6 @@ namespace sockopt
 // BoolUnit: if true accepts values of type bool (but passed as T into libzmq)
 template<int Opt, class T, bool BoolUnit = false> struct integral_option
 {
-    ZMQ_CONSTEXPR_VAR integral_option(){}
 };
 
 // NullTerm:
@@ -1433,7 +1432,6 @@ template<int Opt, class T, bool BoolUnit = false> struct integral_option
 // 2: binary (size 32) or Z85 encoder string of size 41 (null included)
 template<int Opt, int NullTerm = 1> struct array_option
 {
-    ZMQ_CONSTEXPR_VAR array_option(){}
 };
 
 #define ZMQ_DEFINE_INTEGRAL_OPT(OPT, NAME, TYPE)                                    \
